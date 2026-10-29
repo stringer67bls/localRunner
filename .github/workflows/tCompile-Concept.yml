@@ -31,7 +31,7 @@ jobs:
       - name: Compile Routine
         shell: powershell
         run: |
-          & "C:\R26\TAFJ\bin\tCompile.bat" "EB.TEST.ROUTINE"
+          & "C:\R26\TAFJ\bin\tCompile.bat" "EB.GET.SYSTEM.DEF.FILE"
 
           if ($LASTEXITCODE -ne 0) {
               throw "TAFJ Compilation Failed"
