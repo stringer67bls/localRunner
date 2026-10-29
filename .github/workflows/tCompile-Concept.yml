@@ -7,6 +7,11 @@ on:
 
   workflow_dispatch:
 
+# Prevent overlapping runs against the same TAFJ installation
+concurrency:
+  group: tafj-r26-compilation
+  cancel-in-progress: false
+
 jobs:
   compile:
     name: Compile T24 Routines
@@ -37,7 +42,13 @@ jobs:
           Write-Host "JAVA_HOME : $env:JAVA_HOME"
           Write-Host "WORKSPACE : $env:GITHUB_WORKSPACE"
 
-          & "$env:JAVA_HOME\bin\java.exe" -version
+          $java = Join-Path $env:JAVA_HOME "bin\java.exe"
+
+          if (-not (Test-Path -LiteralPath $java -PathType Leaf)) {
+              throw "Java executable not found: $java"
+          }
+
+          & $java -version
 
           if ($LASTEXITCODE -ne 0) {
               throw "Java validation failed."
@@ -53,26 +64,27 @@ jobs:
           $classesDir = Join-Path $env:TAFJ_HOME "data\tafj\classes\com\temenos\t24"
           $jarsDir = Join-Path $env:TAFJ_HOME "data\tafj\jars"
 
-          if (-not (Test-Path $sourceDir -PathType Container)) {
+          if (-not (Test-Path -LiteralPath $sourceDir -PathType Container)) {
               throw "Source directory not found: $sourceDir"
           }
 
-          if (-not (Test-Path $compiler -PathType Leaf)) {
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
               throw "TAFJ compiler not found: $compiler"
           }
 
-          if (-not (Test-Path "$env:JAVA_HOME\bin\java.exe")) {
-              throw "Java executable not found."
-          }
-
-          $routines = @(
-              Get-ChildItem $sourceDir -File |
-              Where-Object {
-                  $_.Extension -in @(".component", ".b")
-              }
+          $components = @(
+              Get-ChildItem -LiteralPath $sourceDir -File -Filter "*.component" |
+              Sort-Object Name
           )
 
-          if ($routines.Count -eq 0) {
+          $routines = @(
+              Get-ChildItem -LiteralPath $sourceDir -File -Filter "*.b" |
+              Sort-Object Name
+          )
+
+          $totalFiles = $components.Count + $routines.Count
+
+          if ($totalFiles -eq 0) {
               throw "No .component or .b routines found."
           }
 
@@ -84,13 +96,37 @@ jobs:
           Write-Host "Compiler         : $compiler"
           Write-Host "Classes Output   : $classesDir"
           Write-Host "JAR Output       : $jarsDir"
+          Write-Host "Components Found : $($components.Count)"
           Write-Host "Routines Found   : $($routines.Count)"
+          Write-Host "Total Files      : $totalFiles"
 
-          $routines | ForEach-Object {
-              Write-Host " - $($_.Name)"
+          Write-Host ""
+          Write-Host "COMPILATION ORDER"
+          Write-Host "----------------------------------------"
+
+          foreach ($file in $components) {
+              Write-Host "COMPONENT: $($file.Name)"
           }
 
-      # STEP 4: COMPILE ROUTINES
+          foreach ($file in $routines) {
+              Write-Host "ROUTINE: $($file.Name)"
+          }
+
+      # STEP 4: RECORD COMPILATION START TIME
+      - name: Record Compilation Start Time
+        shell: powershell
+        run: |
+          $buildStart = (Get-Date).ToUniversalTime().ToString("o")
+
+          "TAFJ_BUILD_START=$buildStart" |
+              Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "========================================"
+          Write-Host "COMPILATION START TIME"
+          Write-Host "========================================"
+          Write-Host "UTC: $buildStart"
+
+      # STEP 5: COMPILE ROUTINES
       - name: Compile T24 Routines
         shell: powershell
         run: |
@@ -99,18 +135,15 @@ jobs:
           $sourceDir = Join-Path $env:GITHUB_WORKSPACE ".github\routines"
           $compiler = Join-Path $env:TAFJ_HOME "bin\tCompile.bat"
 
-          $classesDir = Join-Path $env:TAFJ_HOME "data\tafj\classes\com\temenos\t24"
-          $jarsDir = Join-Path $env:TAFJ_HOME "data\tafj\jars"
-
           # Discover components first
           $components = @(
-              Get-ChildItem $sourceDir -File -Filter "*.component" |
+              Get-ChildItem -LiteralPath $sourceDir -File -Filter "*.component" |
               Sort-Object Name
           )
 
           # Discover remaining routines
           $routines = @(
-              Get-ChildItem $sourceDir -File -Filter "*.b" |
+              Get-ChildItem -LiteralPath $sourceDir -File -Filter "*.b" |
               Sort-Object Name
           )
 
@@ -212,56 +245,147 @@ jobs:
           Write-Host "Total Failed    : 0"
           Write-Host "Pipeline Status : SUCCESS"
 
-      # STEP 5: VERIFY GENERATED OUTPUTS
+      # STEP 6: VERIFY GENERATED ARTIFACTS
       - name: Verify Generated Classes and JARs
         shell: powershell
         run: |
+          $sourceDir = Join-Path $env:GITHUB_WORKSPACE ".github\routines"
+
           $classesDir = Join-Path $env:TAFJ_HOME "data\tafj\classes\com\temenos\t24"
           $jarsDir = Join-Path $env:TAFJ_HOME "data\tafj\jars"
 
           Write-Host "========================================"
-          Write-Host "VERIFYING GENERATED TAFJ OUTPUTS"
+          Write-Host "TAFJ GENERATED ARTIFACT VALIDATION"
           Write-Host "========================================"
 
-          # Verify class files
-          if (-not (Test-Path $classesDir)) {
+          if (-not (Test-Path -LiteralPath $classesDir -PathType Container)) {
               throw "Classes directory not found: $classesDir"
           }
 
-          $classFiles = @(
-              Get-ChildItem $classesDir -Recurse -Filter "*.class" -File
-          )
-
-          Write-Host "Class Files Found: $($classFiles.Count)"
-
-          if ($classFiles.Count -eq 0) {
-              throw "No compiled class files found."
-          }
-
-          $classFiles | ForEach-Object {
-              Write-Host "CLASS: $($_.FullName)"
-          }
-
-          # Verify JAR files
-          if (-not (Test-Path $jarsDir)) {
+          if (-not (Test-Path -LiteralPath $jarsDir -PathType Container)) {
               throw "JAR directory not found: $jarsDir"
           }
 
-          $jarFiles = @(
-              Get-ChildItem $jarsDir -Filter "*.jar" -File
+          # Discover source files
+          $components = @(
+              Get-ChildItem -LiteralPath $sourceDir -File -Filter "*.component" |
+              Sort-Object Name
           )
 
-          Write-Host "JAR Files Found: $($jarFiles.Count)"
+          $routines = @(
+              Get-ChildItem -LiteralPath $sourceDir -File -Filter "*.b" |
+              Sort-Object Name
+          )
 
-          if ($jarFiles.Count -eq 0) {
-              throw "No JAR files found."
+          $validatedClasses = 0
+          $validatedJars = 0
+
+          # Read compilation start time
+          if (-not $env:TAFJ_BUILD_START) {
+              throw "TAFJ_BUILD_START not defined."
           }
 
-          $jarFiles | ForEach-Object {
-              Write-Host "JAR: $($_.FullName)"
+          $buildStart = [DateTime]::Parse(
+              $env:TAFJ_BUILD_START,
+              [System.Globalization.CultureInfo]::InvariantCulture,
+              [System.Globalization.DateTimeStyles]::RoundtripKind
+          ).ToUniversalTime()
+
+          Write-Host "Build Start (UTC): $buildStart"
+
+          # ========================================
+          # VALIDATE COMPONENT JARS
+          # ========================================
+
+          Write-Host ""
+          Write-Host "VALIDATING COMPONENT JARS"
+          Write-Host "----------------------------------------"
+
+          foreach ($component in $components) {
+
+              $jarName = $component.BaseName + ".jar"
+              $jarPath = Join-Path $jarsDir $jarName
+
+              Write-Host "Component : $($component.Name)"
+              Write-Host "Expected  : $jarName"
+
+              if (-not (Test-Path -LiteralPath $jarPath -PathType Leaf)) {
+                  throw "FAILED: Expected JAR not found: $jarPath"
+              }
+
+              $jar = Get-Item -LiteralPath $jarPath
+
+              if ($jar.LastWriteTimeUtc -lt $buildStart) {
+                  throw "FAILED: JAR was not updated during this build: $jarName"
+              }
+
+              if ($jar.Length -eq 0) {
+                  throw "FAILED: Generated JAR is empty: $jarName"
+              }
+
+              $validatedJars++
+
+              Write-Host "SUCCESS: $jarName"
+              Write-Host "Size: $($jar.Length) bytes"
+              Write-Host ""
+          }
+
+          # ========================================
+          # VALIDATE ROUTINE CLASS FILES
+          # ========================================
+
+          Write-Host ""
+          Write-Host "VALIDATING ROUTINE CLASSES"
+          Write-Host "----------------------------------------"
+
+          foreach ($routine in $routines) {
+
+              $className = $routine.BaseName.Replace(".", "_") + "_cl.class"
+              $classPath = Join-Path $classesDir $className
+
+              Write-Host "Routine  : $($routine.Name)"
+              Write-Host "Expected : $className"
+
+              if (-not (Test-Path -LiteralPath $classPath -PathType Leaf)) {
+                  throw "FAILED: Expected class not found: $classPath"
+              }
+
+              $class = Get-Item -LiteralPath $classPath
+
+              if ($class.LastWriteTimeUtc -lt $buildStart) {
+                  throw "FAILED: Class was not updated during this build: $className"
+              }
+
+              if ($class.Length -eq 0) {
+                  throw "FAILED: Generated class is empty: $className"
+              }
+
+              $validatedClasses++
+
+              Write-Host "SUCCESS: $className"
+              Write-Host "Size: $($class.Length) bytes"
+              Write-Host ""
+          }
+
+          # ========================================
+          # FINAL VALIDATION
+          # ========================================
+
+          if ($validatedClasses -ne $routines.Count) {
+              throw "Class validation count mismatch."
+          }
+
+          if ($validatedJars -ne $components.Count) {
+              throw "JAR validation count mismatch."
           }
 
           Write-Host ""
           Write-Host "========================================"
-          Write-Host "TAFJ OUTPUT VERIFICATION COMPLETED"
+          Write-Host "TAFJ ARTIFACT VALIDATION SUMMARY"
+          Write-Host "========================================"
+          Write-Host "Routines Submitted : $($routines.Count)"
+          Write-Host "Classes Validated  : $validatedClasses"
+          Write-Host "Components         : $($components.Count)"
+          Write-Host "JARs Validated     : $validatedJars"
+          Write-Host "Pipeline Status    : SUCCESS"
           Write-Host "========================================"
