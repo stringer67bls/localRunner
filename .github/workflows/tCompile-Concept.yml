@@ -1,0 +1,40 @@
+name: TAFJ Routine Compilation
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+jobs:
+  compile:
+    name: Compile T24 Routines
+
+    runs-on: [self-hosted, Windows, X64]
+
+    steps:
+
+      - name: Checkout T24 Source
+        uses: actions/checkout@v4
+
+      - name: Configure TAFJ Environment
+        shell: powershell
+        run: |
+          $env:TAFJ_HOME = "C:\R26\TAFJ"
+          $env:JAVA_HOME = "C:\Program Files\Java\jdk-21"
+
+          $env:PATH = "$env:TAFJ_HOME\bin;$env:JAVA_HOME\bin;$env:PATH"
+
+          Write-Host "TAFJ Environment Configured"
+
+      - name: Compile Routine
+        shell: powershell
+        run: |
+          & "C:\R26\TAFJ\bin\tCompile.bat" "EB.TEST.ROUTINE"
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "TAFJ Compilation Failed"
+          }
+
+          Write-Host "TAFJ Compilation Successful"
