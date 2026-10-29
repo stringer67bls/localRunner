@@ -13,28 +13,69 @@ jobs:
 
     runs-on: [self-hosted, Windows, X64]
 
+    env:
+      TAFJ_HOME: C:\R26\TAFJ
+      JAVA_HOME: C:\Program Files\Java\jdk-21
+
     steps:
 
+      # Step 1: Retrieve source code from GitHub
       - name: Checkout T24 Source
         uses: actions/checkout@v4
 
+      # Step 2: Configure TAFJ environment
       - name: Configure TAFJ Environment
         shell: powershell
         run: |
-          $env:TAFJ_HOME = "C:\R26\TAFJ"
-          $env:JAVA_HOME = "C:\Program Files\Java\jdk-21"
+          $env:PATH = "$env:JAVA_HOME\bin;$env:TAFJ_HOME\bin;$env:PATH"
 
-          $env:PATH = "$env:TAFJ_HOME\bin;$env:JAVA_HOME\bin;$env:PATH"
+          Write-Host "=================================="
+          Write-Host "TAFJ Environment Configuration"
+          Write-Host "=================================="
+          Write-Host "TAFJ_HOME: $env:TAFJ_HOME"
+          Write-Host "JAVA_HOME: $env:JAVA_HOME"
+          Write-Host "Workspace: $env:GITHUB_WORKSPACE"
 
-          Write-Host "TAFJ Environment Configured"
+          & "$env:JAVA_HOME\bin\java.exe" -version
 
-      - name: Compile Routine
+      # Step 3: Verify routine and compiler
+      - name: Validate Compilation Requirements
         shell: powershell
         run: |
-          & "C:\R26\TAFJ\bin\tCompile.bat" "EB.GET.SYSTEM.DEF.FILE"
+          $routine = Join-Path $env:GITHUB_WORKSPACE "routines\EB.GET.SYSTEM.DEF.FILE"
+          $compiler = Join-Path $env:TAFJ_HOME "bin\tCompile.bat"
 
-          if ($LASTEXITCODE -ne 0) {
-              throw "TAFJ Compilation Failed"
+          if (-not (Test-Path $routine)) {
+              throw "Routine not found: $routine"
           }
 
-          Write-Host "TAFJ Compilation Successful"
+          if (-not (Test-Path $compiler)) {
+              throw "TAFJ compiler not found: $compiler"
+          }
+
+          Write-Host "Routine found: $routine"
+          Write-Host "Compiler found: $compiler"
+
+      # Step 4: Compile T24 routine
+      - name: Compile T24 Routine
+        shell: powershell
+        run: |
+          $env:PATH = "$env:JAVA_HOME\bin;$env:TAFJ_HOME\bin;$env:PATH"
+
+          $routine = Join-Path $env:GITHUB_WORKSPACE "routines\EB.GET.SYSTEM.DEF.FILE"
+          $compiler = Join-Path $env:TAFJ_HOME "bin\tCompile.bat"
+
+          Write-Host "=================================="
+          Write-Host "Starting TAFJ Compilation"
+          Write-Host "=================================="
+          Write-Host "Routine: $routine"
+
+          & $compiler $routine
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "TAFJ Compilation Failed. Exit Code: $LASTEXITCODE"
+          }
+
+          Write-Host "=================================="
+          Write-Host "TAFJ Compilation Completed"
+          Write-Host "=================================="
