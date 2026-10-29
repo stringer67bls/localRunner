@@ -1,0 +1,26 @@
+name: My First CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-runner:
+    name: Test Windows Runner
+    runs-on: [self-hosted, Windows, X64]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Verify Runner
+        shell: powershell
+        run: |
+          Write-Host "================================"
+          Write-Host "CI/CD PIPELINE STARTED"
+          Write-Host "================================"
+          Write-Host "Computer: $env:COMPUTERNAME"
+          Write-Host "User: $env:USERNAME"
+          Write-Host "Date: $(Get-Date)"
+          Write-Host "CI/CD execution successful!"
