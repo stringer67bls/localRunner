@@ -42,7 +42,8 @@ jobs:
       - name: Validate Compilation Requirements
         shell: powershell
         run: |
-          $routine = Join-Path $env:GITHUB_WORKSPACE ".github\workflows\routines\EB.GET.SYSTEM.DEF.FILE"
+          
+          $routine = Join-Path $env:GITHUB_WORKSPACE ".github\routines\EB.GET.SYSTEM.DEF.FILE"
           $compiler = Join-Path $env:TAFJ_HOME "bin\tCompile.bat"
 
           if (-not (Test-Path $routine)) {
@@ -63,7 +64,7 @@ jobs:
           $env:PATH = "$env:JAVA_HOME\bin;$env:TAFJ_HOME\bin;$env:PATH"
 
         
-          $routine = Join-Path $env:GITHUB_WORKSPACE ".github\workflows\routines\EB.GET.SYSTEM.DEF.FILE"
+          $routine = Join-Path $env:GITHUB_WORKSPACE ".github\routines\EB.GET.SYSTEM.DEF.FILE"
           $compiler = Join-Path $env:TAFJ_HOME "bin\tCompile.bat"
 
           Write-Host "=================================="
