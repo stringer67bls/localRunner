@@ -15,69 +15,253 @@ jobs:
 
     env:
       TAFJ_HOME: C:\R26\TAFJ
-      JAVA_HOME: C:\Program Files\Java\jdk-21
+      JAVA_HOME: C:\R26\3rdParty\Java\jdk-21
 
     steps:
 
-      # Step 1: Retrieve source code from GitHub
+      # STEP 1: CHECKOUT SOURCE
       - name: Checkout T24 Source
         uses: actions/checkout@v4
 
-      # Step 2: Configure TAFJ environment
+      # STEP 2: CONFIGURE ENVIRONMENT
       - name: Configure TAFJ Environment
         shell: powershell
         run: |
           $env:PATH = "$env:JAVA_HOME\bin;$env:TAFJ_HOME\bin;$env:PATH"
 
-          Write-Host "=================================="
-          Write-Host "TAFJ Environment Configuration"
-          Write-Host "=================================="
-          Write-Host "TAFJ_HOME: $env:TAFJ_HOME"
-          Write-Host "JAVA_HOME: $env:JAVA_HOME"
-          Write-Host "Workspace: $env:GITHUB_WORKSPACE"
+          Write-Host "========================================"
+          Write-Host "TAFJ ENVIRONMENT CONFIGURATION"
+          Write-Host "========================================"
+
+          Write-Host "TAFJ_HOME : $env:TAFJ_HOME"
+          Write-Host "JAVA_HOME : $env:JAVA_HOME"
+          Write-Host "WORKSPACE : $env:GITHUB_WORKSPACE"
 
           & "$env:JAVA_HOME\bin\java.exe" -version
 
-      # Step 3: Verify routine and compiler
+          if ($LASTEXITCODE -ne 0) {
+              throw "Java validation failed."
+          }
+
+      # STEP 3: VALIDATE COMPILATION REQUIREMENTS
       - name: Validate Compilation Requirements
         shell: powershell
         run: |
-          
-          $routine = Join-Path $env:GITHUB_WORKSPACE ".github\routines\EB.GET.SYSTEM.DEF.FILE"
+          $sourceDir = Join-Path $env:GITHUB_WORKSPACE ".github\routines"
           $compiler = Join-Path $env:TAFJ_HOME "bin\tCompile.bat"
 
-          if (-not (Test-Path $routine)) {
-              throw "Routine not found: $routine"
+          $classesDir = Join-Path $env:TAFJ_HOME "data\tafj\classes\com\temenos\t24"
+          $jarsDir = Join-Path $env:TAFJ_HOME "data\tafj\jars"
+
+          if (-not (Test-Path $sourceDir -PathType Container)) {
+              throw "Source directory not found: $sourceDir"
           }
 
-          if (-not (Test-Path $compiler)) {
+          if (-not (Test-Path $compiler -PathType Leaf)) {
               throw "TAFJ compiler not found: $compiler"
           }
 
-          Write-Host "Routine found: $routine"
-          Write-Host "Compiler found: $compiler"
+          if (-not (Test-Path "$env:JAVA_HOME\bin\java.exe")) {
+              throw "Java executable not found."
+          }
 
-      # Step 4: Compile T24 routine
-      - name: Compile T24 Routine
+          $routines = @(
+              Get-ChildItem $sourceDir -File |
+              Where-Object {
+                  $_.Extension -in @(".component", ".b")
+              }
+          )
+
+          if ($routines.Count -eq 0) {
+              throw "No .component or .b routines found."
+          }
+
+          Write-Host "========================================"
+          Write-Host "COMPILATION REQUIREMENTS VALIDATED"
+          Write-Host "========================================"
+
+          Write-Host "Source Directory : $sourceDir"
+          Write-Host "Compiler         : $compiler"
+          Write-Host "Classes Output   : $classesDir"
+          Write-Host "JAR Output       : $jarsDir"
+          Write-Host "Routines Found   : $($routines.Count)"
+
+          $routines | ForEach-Object {
+              Write-Host " - $($_.Name)"
+          }
+
+      # STEP 4: COMPILE ROUTINES
+      - name: Compile T24 Routines
         shell: powershell
         run: |
           $env:PATH = "$env:JAVA_HOME\bin;$env:TAFJ_HOME\bin;$env:PATH"
 
-        
-          $routine = Join-Path $env:GITHUB_WORKSPACE ".github\routines\EB.GET.SYSTEM.DEF.FILE"
+          $sourceDir = Join-Path $env:GITHUB_WORKSPACE ".github\routines"
           $compiler = Join-Path $env:TAFJ_HOME "bin\tCompile.bat"
 
-          Write-Host "=================================="
-          Write-Host "Starting TAFJ Compilation"
-          Write-Host "=================================="
-          Write-Host "Routine: $routine"
+          $classesDir = Join-Path $env:TAFJ_HOME "data\tafj\classes\com\temenos\t24"
+          $jarsDir = Join-Path $env:TAFJ_HOME "data\tafj\jars"
 
-          & $compiler $routine
+          # Discover components first
+          $components = @(
+              Get-ChildItem $sourceDir -File -Filter "*.component" |
+              Sort-Object Name
+          )
 
-          if ($LASTEXITCODE -ne 0) {
-              throw "TAFJ Compilation Failed. Exit Code: $LASTEXITCODE"
+          # Discover remaining routines
+          $routines = @(
+              Get-ChildItem $sourceDir -File -Filter "*.b" |
+              Sort-Object Name
+          )
+
+          # Compilation order
+          $allFiles = @($components) + @($routines)
+
+          $totalFiles = $allFiles.Count
+          $compiledCount = 0
+
+          Write-Host "========================================"
+          Write-Host "TAFJ AUTOMATED COMPILATION"
+          Write-Host "========================================"
+
+          Write-Host "Components Found : $($components.Count)"
+          Write-Host "Routines Found   : $($routines.Count)"
+          Write-Host "Total Files      : $totalFiles"
+
+          if ($totalFiles -eq 0) {
+              throw "No source files found."
           }
 
-          Write-Host "=================================="
-          Write-Host "TAFJ Compilation Completed"
-          Write-Host "=================================="
+          foreach ($file in $allFiles) {
+
+              Write-Host ""
+              Write-Host "========================================"
+              Write-Host "COMPILING: $($file.Name)"
+              Write-Host "========================================"
+
+              $output = @(& $compiler $file.FullName 2>&1)
+              $exitCode = $LASTEXITCODE
+
+              $output | ForEach-Object {
+                  Write-Host "$_"
+              }
+
+              $outputText = $output -join "`n"
+
+              # Extract compilation statistics
+              $matches = @(
+                  [regex]::Matches(
+                      $outputText,
+                      '(\d+)\s+error(?:s)?\s*\|\s*(\d+)\s+compiled\s*\|\s*(\d+)\s+remaining'
+                  )
+              )
+
+              if ($matches.Count -eq 0) {
+                  throw "FAILED: $($file.Name) - Compilation summary missing."
+              }
+
+              $summary = $matches[-1]
+
+              $errors = [int]$summary.Groups[1].Value
+              $compiled = [int]$summary.Groups[2].Value
+              $remaining = [int]$summary.Groups[3].Value
+
+              Write-Host ""
+              Write-Host "----------------------------------------"
+              Write-Host "COMPILATION RESULT"
+              Write-Host "----------------------------------------"
+              Write-Host "File      : $($file.Name)"
+              Write-Host "Compiled  : $compiled"
+              Write-Host "Errors    : $errors"
+              Write-Host "Remaining : $remaining"
+              Write-Host "Exit Code : $exitCode"
+
+              if ($exitCode -ne 0) {
+                  throw "Compilation failed for $($file.Name). Exit code: $exitCode"
+              }
+
+              if ($errors -ne 0) {
+                  throw "Compilation failed for $($file.Name). Errors: $errors"
+              }
+
+              if ($compiled -ne 1) {
+                  throw "Compilation failed for $($file.Name). Expected 1 compiled, got $compiled."
+              }
+
+              if ($remaining -ne 0) {
+                  throw "Compilation incomplete for $($file.Name). Remaining: $remaining"
+              }
+
+              $compiledCount++
+
+              Write-Host "SUCCESS: $($file.Name)"
+          }
+
+          # Final compilation verification
+          if ($compiledCount -ne $totalFiles) {
+              throw "Compilation incomplete. Expected $totalFiles, got $compiledCount."
+          }
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "TAFJ COMPILATION SUMMARY"
+          Write-Host "========================================"
+
+          Write-Host "Total Submitted : $totalFiles"
+          Write-Host "Total Compiled  : $compiledCount"
+          Write-Host "Total Failed    : 0"
+          Write-Host "Pipeline Status : SUCCESS"
+
+      # STEP 5: VERIFY GENERATED OUTPUTS
+      - name: Verify Generated Classes and JARs
+        shell: powershell
+        run: |
+          $classesDir = Join-Path $env:TAFJ_HOME "data\tafj\classes\com\temenos\t24"
+          $jarsDir = Join-Path $env:TAFJ_HOME "data\tafj\jars"
+
+          Write-Host "========================================"
+          Write-Host "VERIFYING GENERATED TAFJ OUTPUTS"
+          Write-Host "========================================"
+
+          # Verify class files
+          if (-not (Test-Path $classesDir)) {
+              throw "Classes directory not found: $classesDir"
+          }
+
+          $classFiles = @(
+              Get-ChildItem $classesDir -Recurse -Filter "*.class" -File
+          )
+
+          Write-Host "Class Files Found: $($classFiles.Count)"
+
+          if ($classFiles.Count -eq 0) {
+              throw "No compiled class files found."
+          }
+
+          $classFiles | ForEach-Object {
+              Write-Host "CLASS: $($_.FullName)"
+          }
+
+          # Verify JAR files
+          if (-not (Test-Path $jarsDir)) {
+              throw "JAR directory not found: $jarsDir"
+          }
+
+          $jarFiles = @(
+              Get-ChildItem $jarsDir -Filter "*.jar" -File
+          )
+
+          Write-Host "JAR Files Found: $($jarFiles.Count)"
+
+          if ($jarFiles.Count -eq 0) {
+              throw "No JAR files found."
+          }
+
+          $jarFiles | ForEach-Object {
+              Write-Host "JAR: $($_.FullName)"
+          }
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "TAFJ OUTPUT VERIFICATION COMPLETED"
+          Write-Host "========================================"
