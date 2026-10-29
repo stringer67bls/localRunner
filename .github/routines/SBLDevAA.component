@@ -1,0 +1,36 @@
+component SBLDevAA
+# Component Isolation Definition
+metamodelVersion 1.6
+# -------------------------------------------------
+
+private method eAaScheduleProjectorSb (
+    INOUT schedArr string
+)
+{
+    jBC: E.AA.SCHEDULE.PROJECTOR.SB
+}
+
+private method sbRepaymentAmount (
+)
+{
+    jBC: SB.REPAYMENT.AMOUNT
+}
+
+private method eAaPrimeRate (
+)
+{
+   jBC: E.AA.PRIME.RATE
+}
+
+private method sbGetAAStmtNet (
+INOUT EN.REC string
+)
+{
+   jBC: SB.GET.AA.STMT.NET
+}
+
+
+
+
+
+
