@@ -1,0 +1,104 @@
+name: Approved PR Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Open PR number to validate"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: approved-pr-build-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  select:
+    name: Select PR revision
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    permissions:
+      contents: read
+      pull-requests: read
+
+    outputs:
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
+
+    steps:
+      - name: Validate PR and capture exact revision
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Enter a positive PR number."
+            exit 1
+          fi
+
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > pr.json
+
+          jq -e --arg repo "$GH_REPO" '
+            .state == "open" and
+            .draft == false and
+            .base.ref == "main" and
+            .base.repo.full_name == $repo and
+            .head.repo.full_name == $repo
+          ' pr.json > /dev/null || {
+            echo "::error::Use an open, non-draft PR from this repository targeting main."
+            exit 1
+          }
+
+          HEAD_SHA=$(jq -r '.head.sha' pr.json)
+          BASE_SHA=$(jq -r '.base.sha' pr.json)
+
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Build approval request"
+            echo
+            echo "- PR: #$PR_NUMBER"
+            echo "- Selected source commit: $HEAD_SHA"
+            echo "- Selected main commit: $BASE_SHA"
+            echo
+            echo "Review this PR revision before approving TAFJ-BUILD."
+            echo
+            echo "This initial version tests approval and runner routing only."
+            echo "It does not compile, package, or deploy files."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  approval-test:
+    name: Approve PR revision and test runner
+    needs: select
+
+    environment:
+      name: TAFJ-BUILD
+
+    runs-on: [self-hosted, Windows, X64, tafj-r26-build]
+    timeout-minutes: 5
+
+    steps:
+      - name: Confirm approved runner access
+        shell: powershell
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          SELECTED_HEAD_SHA: ${{ needs.select.outputs.head_sha }}
+          SELECTED_BASE_SHA: ${{ needs.select.outputs.base_sha }}
+        run: |
+          Write-Host "Approval received through TAFJ-BUILD."
+          Write-Host "Runner: $env:RUNNER_NAME"
+          Write-Host "PR: $env:PR_NUMBER"
+          Write-Host "Selected source commit: $env:SELECTED_HEAD_SHA"
+          Write-Host "Selected main commit: $env:SELECTED_BASE_SHA"
+          Write-Host "Approval test only. No compilation or deployment performed."
