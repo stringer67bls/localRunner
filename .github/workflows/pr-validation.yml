@@ -1,0 +1,52 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate Routine Inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout PR source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check routine inputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sourceDir = Join-Path $env:GITHUB_WORKSPACE ".github/routines"
+
+          if (-not (Test-Path -LiteralPath $sourceDir -PathType Container)) {
+              throw "Source directory missing: .github/routines"
+          }
+
+          $files = @(
+              Get-ChildItem -LiteralPath $sourceDir -File |
+              Where-Object { $_.Extension -in ".b", ".component" }
+          )
+
+          if ($files.Count -eq 0) {
+              throw "No .b or .component files found."
+          }
+
+          foreach ($file in $files) {
+              if ($file.Length -eq 0) {
+                  throw "Empty source file: $($file.Name)"
+              }
+          }
+
+          Write-Host "PASS: Found $($files.Count) non-empty routine/component files."
