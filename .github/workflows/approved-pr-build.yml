@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "Open PR number to validate"
+        description: "Open PR number to compile"
         required: true
         type: string
 
@@ -25,6 +25,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      statuses: write
 
     outputs:
       head_sha: ${{ steps.pr.outputs.head_sha }}
@@ -61,44 +62,350 @@ jobs:
 
           HEAD_SHA=$(jq -r '.head.sha' pr.json)
           BASE_SHA=$(jq -r '.base.sha' pr.json)
+          RUN_URL="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID"
 
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
 
+          gh api --method POST "repos/$GH_REPO/statuses/$HEAD_SHA" \
+            -f state=pending \
+            -f context="TAFJ PR Compilation" \
+            -f description="Validating revision and awaiting build approval" \
+            -f target_url="$RUN_URL"
+
+          gh api "repos/$GH_REPO/compare/$BASE_SHA...$HEAD_SHA" \
+            > comparison.json
+
+          jq -e '
+            .status == "ahead" or .status == "identical"
+          ' comparison.json > /dev/null || {
+            echo "::error::Update the PR branch with current main, then start a new build."
+            exit 1
+          }
+
           {
-            echo "## Build approval request"
+            echo "## TAFJ compilation approval request"
             echo
             echo "- PR: #$PR_NUMBER"
-            echo "- Selected source commit: $HEAD_SHA"
-            echo "- Selected main commit: $BASE_SHA"
+            echo "- Source commit: $HEAD_SHA"
+            echo "- Main commit: $BASE_SHA"
             echo
-            echo "Review this PR revision before approving TAFJ-BUILD."
-            echo
-            echo "This initial version tests approval and runner routing only."
-            echo "It does not compile, package, or deploy files."
+            echo "Review the source revision before approving TAFJ-BUILD."
+            echo "Approval permits compilation into C:\R26\TAFJ."
+            echo "This workflow does not deploy to a runtime environment."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  approval-test:
-    name: Approve PR revision and test runner
+  compile:
+    name: Compile approved PR
     needs: select
 
     environment:
       name: TAFJ-BUILD
 
     runs-on: [self-hosted, Windows, X64, tafj-r26-build]
-    timeout-minutes: 5
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+      pull-requests: read
+
+    concurrency:
+      group: tafj-r26-compilation
+      cancel-in-progress: false
+
+    env:
+      TAFJ_HOME: C:\R26\TAFJ
+      JAVA_HOME: C:\R26\3rdParty\Java\jdk-21
+      PR_NUMBER: ${{ inputs.pr_number }}
+      SELECTED_HEAD_SHA: ${{ needs.select.outputs.head_sha }}
+      SELECTED_BASE_SHA: ${{ needs.select.outputs.base_sha }}
 
     steps:
-      - name: Confirm approved runner access
+      - name: Recheck revision after approval
         shell: powershell
         env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $headers = @{
+              Authorization = "Bearer $env:GH_TOKEN"
+              Accept = "application/vnd.github+json"
+          }
+
+          $uri = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/pulls/$env:PR_NUMBER"
+          $pr = Invoke-RestMethod -Uri $uri -Headers $headers
+
+          if ($pr.state -ne "open" -or $pr.draft) {
+              throw "PR must remain open and non-draft."
+          }
+
+          if ($pr.base.ref -ne "main" -or
+              $pr.head.repo.full_name -ne $env:GITHUB_REPOSITORY) {
+              throw "PR repository or target changed."
+          }
+
+          if ($pr.head.sha -ne $env:SELECTED_HEAD_SHA -or
+              $pr.base.sha -ne $env:SELECTED_BASE_SHA) {
+              throw "PR or main changed while waiting. Start a new workflow run."
+          }
+
+          Write-Host "Approved revision remains current."
+          Write-Host "PR: $env:PR_NUMBER"
+          Write-Host "Source: $env:SELECTED_HEAD_SHA"
+          Write-Host "Main: $env:SELECTED_BASE_SHA"
+
+      - name: Checkout selected PR commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.select.outputs.head_sha }}
+          persist-credentials: false
+          path: pr-source
+
+      - name: Verify checkout and compilation requirements
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $checkoutDir = Join-Path $env:GITHUB_WORKSPACE "pr-source"
+
+          $actualSha = & git -C $checkoutDir rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or
+              "$actualSha".Trim() -ne $env:SELECTED_HEAD_SHA) {
+              throw "Checked-out commit does not match selected revision."
+          }
+
+          $sourceDir = Join-Path $checkoutDir ".github\routines"
+          $compiler = Join-Path $env:TAFJ_HOME "bin\tCompile.bat"
+          $java = Join-Path $env:JAVA_HOME "bin\java.exe"
+
+          if (-not (Test-Path -LiteralPath $sourceDir -PathType Container)) {
+              throw "Routine source directory is missing."
+          }
+
+          foreach ($requiredFile in @($compiler, $java)) {
+              if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
+                  throw "Required executable missing: $requiredFile"
+              }
+          }
+
+          $files = @(
+              Get-ChildItem -LiteralPath $sourceDir -File |
+              Where-Object { $_.Extension -in ".b", ".component" }
+          )
+
+          if ($files.Count -eq 0) {
+              throw "No .b or .component files found."
+          }
+
+          foreach ($file in $files) {
+              if ($file.Length -eq 0) {
+                  throw "Empty source file: $($file.Name)"
+              }
+          }
+
+          Write-Host "Verified source commit: $actualSha"
+          Write-Host "Source files: $($files.Count)"
+          Write-Host "TAFJ_HOME: $env:TAFJ_HOME"
+          Write-Host "JAVA_HOME: $env:JAVA_HOME"
+
+      - name: Compile and validate expected artifacts
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:PATH = "$env:JAVA_HOME\bin;$env:TAFJ_HOME\bin;$env:PATH"
+
+          $sourceDir = Join-Path $env:GITHUB_WORKSPACE "pr-source\.github\routines"
+          $compiler = Join-Path $env:TAFJ_HOME "bin\tCompile.bat"
+          $classesDir = Join-Path $env:TAFJ_HOME "data\tafj\classes\com\temenos\t24"
+          $jarsDir = Join-Path $env:TAFJ_HOME "data\tafj\jars"
+
+          $components = @(
+              Get-ChildItem -LiteralPath $sourceDir -File -Filter "*.component" |
+              Sort-Object Name
+          )
+
+          $routines = @(
+              Get-ChildItem -LiteralPath $sourceDir -File -Filter "*.b" |
+              Sort-Object Name
+          )
+
+          $allFiles = @($components) + @($routines)
+
+          if ($allFiles.Count -eq 0) {
+              throw "No sources selected for compilation."
+          }
+
+          $buildStart = [DateTime]::UtcNow
+          $compiledCount = 0
+
+          foreach ($file in $allFiles) {
+              Write-Host ""
+              Write-Host "COMPILING: $($file.Name)"
+
+              # Capture native stderr without treating every stderr line
+              # as a terminating PowerShell error.
+              $savedPreference = $ErrorActionPreference
+              try {
+                  $ErrorActionPreference = "Continue"
+                  $output = @(& $compiler $file.FullName 2>&1)
+                  $exitCode = $LASTEXITCODE
+              }
+              finally {
+                  $ErrorActionPreference = $savedPreference
+              }
+
+              $output | ForEach-Object { Write-Host "$_" }
+
+              if ($exitCode -ne 0) {
+                  throw "Compiler failed for $($file.Name), exit code $exitCode."
+              }
+
+              $outputText = $output -join "`n"
+              $summaries = [regex]::Matches(
+                  $outputText,
+                  '(\d+)\s+error(?:s)?\s*\|\s*(\d+)\s+compiled\s*\|\s*(\d+)\s+remaining'
+              )
+
+              if ($summaries.Count -eq 0) {
+                  throw "Compilation summary missing for $($file.Name)."
+              }
+
+              foreach ($item in $summaries) {
+                  if ([int]$item.Groups[1].Value -ne 0) {
+                      throw "Compiler reported errors for $($file.Name)."
+                  }
+              }
+
+              $summary = $summaries[$summaries.Count - 1]
+              $compiled = [int]$summary.Groups[2].Value
+              $remaining = [int]$summary.Groups[3].Value
+
+              # Retains the expected statistics from the working lab workflow.
+              if ($compiled -ne 1 -or $remaining -ne 0) {
+                  throw "Unexpected summary for $($file.Name): compiled=$compiled, remaining=$remaining."
+              }
+
+              $compiledCount++
+          }
+
+          function Assert-Artifact {
+              param(
+                  [string]$ArtifactPath,
+                  [DateTime]$StartedUtc
+              )
+
+              if (-not (Test-Path -LiteralPath $ArtifactPath -PathType Leaf)) {
+                  throw "Expected artifact missing: $ArtifactPath"
+              }
+
+              $artifact = Get-Item -LiteralPath $ArtifactPath
+
+              if ($artifact.Length -eq 0) {
+                  throw "Artifact is empty: $ArtifactPath"
+              }
+
+              if ($artifact.LastWriteTimeUtc -lt $StartedUtc) {
+                  throw "Artifact was not updated during this build: $ArtifactPath"
+              }
+
+              $hash = (Get-FileHash -LiteralPath $ArtifactPath -Algorithm SHA256).Hash
+              Write-Host "VALIDATED: $($artifact.Name)"
+              Write-Host "SHA256: $hash"
+          }
+
+          foreach ($component in $components) {
+              $jarPath = Join-Path $jarsDir ($component.BaseName + ".jar")
+              Assert-Artifact -ArtifactPath $jarPath -StartedUtc $buildStart
+          }
+
+          foreach ($routine in $routines) {
+              $className = $routine.BaseName.Replace(".", "_") + "_cl.class"
+              $classPath = Join-Path $classesDir $className
+              Assert-Artifact -ArtifactPath $classPath -StartedUtc $buildStart
+          }
+
+          @(
+              "## TAFJ compilation completed"
+              ""
+              "- PR: #$env:PR_NUMBER"
+              "- Source commit: $env:SELECTED_HEAD_SHA"
+              "- Inputs compiled: $compiledCount"
+              "- Component JARs validated: $($components.Count)"
+              "- Routine classes validated: $($routines.Count)"
+              ""
+              "No deployment performed."
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+  report:
+    name: Report compilation result
+    needs: [select, compile]
+    if: ${{ always() && needs.select.outputs.head_sha != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+
+    steps:
+      - name: Publish result against selected PR commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pr_number }}
           SELECTED_HEAD_SHA: ${{ needs.select.outputs.head_sha }}
           SELECTED_BASE_SHA: ${{ needs.select.outputs.base_sha }}
+          SELECT_RESULT: ${{ needs.select.result }}
+          COMPILE_RESULT: ${{ needs.compile.result }}
         run: |
-          Write-Host "Approval received through TAFJ-BUILD."
-          Write-Host "Runner: $env:RUNNER_NAME"
-          Write-Host "PR: $env:PR_NUMBER"
-          Write-Host "Selected source commit: $env:SELECTED_HEAD_SHA"
-          Write-Host "Selected main commit: $env:SELECTED_BASE_SHA"
-          Write-Host "Approval test only. No compilation or deployment performed."
+          set -euo pipefail
+
+          STATE=failure
+          DESCRIPTION="Build failed, was rejected, or did not complete"
+
+          if [[ "$SELECT_RESULT" == "success" && "$COMPILE_RESULT" == "success" ]]; then
+            if gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > current-pr.json; then
+              if jq -e \
+                --arg head "$SELECTED_HEAD_SHA" \
+                --arg base "$SELECTED_BASE_SHA" \
+                --arg repo "$GH_REPO" '
+                  .state == "open" and
+                  .draft == false and
+                  .base.ref == "main" and
+                  .head.repo.full_name == $repo and
+                  .head.sha == $head and
+                  .base.sha == $base
+                ' current-pr.json > /dev/null; then
+                STATE=success
+                DESCRIPTION="Compilation and expected artifact checks passed"
+              else
+                DESCRIPTION="PR or main changed; start a new approved build"
+              fi
+            else
+              DESCRIPTION="Unable to recheck PR revision; start a new build"
+            fi
+          fi
+
+          RUN_URL="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID"
+
+          gh api --method POST \
+            "repos/$GH_REPO/statuses/$SELECTED_HEAD_SHA" \
+            -f state="$STATE" \
+            -f context="TAFJ PR Compilation" \
+            -f description="$DESCRIPTION" \
+            -f target_url="$RUN_URL"
+
+          {
+            echo "## PR compilation status"
+            echo
+            echo "- PR: #$PR_NUMBER"
+            echo "- Commit: $SELECTED_HEAD_SHA"
+            echo "- Result: $STATE"
+            echo "- Details: $DESCRIPTION"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$STATE" != "success" ]]; then
+            exit 1
+          fi
